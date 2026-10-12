@@ -1,5 +1,6 @@
 # Ximaj RoboSim - EXE bauen und GitHub-Release-Paket erzeugen
 # Aufruf:  powershell -ExecutionPolicy Bypass -File build.ps1
+param([string]$CompilerPath = '')
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -36,8 +37,8 @@ Compress-Archive -Path "dist\XimajRoboSim\*" -DestinationPath $zip
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 "$hash  XimajRoboSim-$version.zip" | Set-Content "$zip.sha256" -Encoding ascii -NoNewline
 # Setup (Inno Setup 6)
-$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+$iscc = @($CompilerPath, "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 $setupHash = $null
 if ($iscc) {
   & $iscc /Q "/DAppVer=$version" installer.iss

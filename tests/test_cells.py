@@ -17,5 +17,7 @@ for e in catalog.CATALOG:
     print(e["name"], "->", s.state, round(s.t, 1), "|", s.message)
     placed = [(o.name, round(o.pos[0]), round(o.pos[1]), round(o.pos[2])) for o in s.scene if o.graspable]
     print("   ", placed[:8])
+    assert s.state == 'idle', f'{e["name"]}: Ablauf hat nicht regulär abgeschlossen'
+    assert all(o.pos[2] >= 0 for o in s.scene if o.graspable and not o.attached), 'Freies Teil unter Hallenboden'
     errs = [l for l in s.log if "KOLL" in l or "nicht" in l or "fehler" in l.lower()]
     print("   Probleme:", errs[:3])

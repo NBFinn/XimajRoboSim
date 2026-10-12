@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QEvent
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QToolButton, QCheckBox, QRadioButton,
                              QButtonGroup, QDoubleSpinBox, QStackedWidget, QFrame, QScrollArea, QMenu, QSizePolicy,
-                             QPushButton, QListWidget, QListWidgetItem, QLineEdit)
+                             QPushButton, QListWidget, QListWidgetItem, QLineEdit, QComboBox)
 
 import theme
 from icons import icon
@@ -167,14 +167,16 @@ class Group(QFrame):
         self.items[text] = c
         return self._stack(c)
 
-    _radio_groups = {}
-
     def radio(self, text, group, checked=False, fn=None, tip=None):
         r = QRadioButton(text)
         r.setChecked(checked)
         if tip:
             r.setToolTip(tip)
-        bg = Group._radio_groups.setdefault(group, QButtonGroup(self))
+        if not hasattr(self, '_radio_groups'):
+            self._radio_groups = {}
+        bg = self._radio_groups.get(group)
+        if bg is None:
+            bg = self._radio_groups[group] = QButtonGroup(self)
         bg.addButton(r)
         if fn:
             r.toggled.connect(lambda v: v and fn())
@@ -254,6 +256,12 @@ class Ribbon(QWidget):
         self.tabs_box.setSpacing(2)
         self.tabs_box.setContentsMargins(6, 4, 0, 0)
         self.hl.addLayout(self.tabs_box)
+        self.compact_tabs = QComboBox()
+        self.compact_tabs.setAccessibleName('Menübandbereich auswählen')
+        self.compact_tabs.setMinimumWidth(170)
+        self.compact_tabs.currentTextChanged.connect(lambda title: title and self.select(title))
+        self.hl.addWidget(self.compact_tabs)
+        self.compact_tabs.hide()
         self.hl.addStretch(1)
         self.right = QHBoxLayout()
         self.right.setSpacing(4)
@@ -292,11 +300,17 @@ class Ribbon(QWidget):
         self.stack.addWidget(sa)
         self.tabs.append((title, b, sa))
         self.pages[title] = p
+        self.compact_tabs.blockSignals(True)
+        self.compact_tabs.addItem(title)
+        self.compact_tabs.blockSignals(False)
         if len(self.tabs) == 1:
             self.select(title)
         return p
 
     def select(self, title):
+        self.compact_tabs.blockSignals(True)
+        self.compact_tabs.setCurrentText(title)
+        self.compact_tabs.blockSignals(False)
         for t, b, sa in self.tabs:
             b.setChecked(t == title)
             if t == title:
@@ -304,6 +318,17 @@ class Ribbon(QWidget):
         if self.collapsed:
             self.toggle_collapsed()
         self.tab_changed.emit(title)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 1100
+        self.compact_tabs.setVisible(compact)
+        for title, button, _ in self.tabs:
+            button.setVisible(not compact)
+        for i in range(self.right.count()):
+            widget = self.right.itemAt(i).widget()
+            if widget:
+                widget.setVisible(not compact)
 
     def current(self):
         return next((t for t, b, _ in self.tabs if b.isChecked()), None)

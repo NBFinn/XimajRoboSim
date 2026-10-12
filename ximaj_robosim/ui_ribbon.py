@@ -136,16 +136,8 @@ class RibbonUI:
         q = self.search.text().strip().lower()
         if not q:
             return
-        for title, page in self.rb.pages.items():
-            for gname, g in page.groups.items():
-                for text, w in g.items.items():
-                    if q in text.lower() and hasattr(w, "click") and w.isEnabled():
-                        self.rb.select(title)
-                        w.click()
-                        self.msg(f"Befehl: {title} › {gname} › {text}")
-                        return
-        import dialogs
-        dialogs.help_dialog(self.win, q)
+        import upgrade_ui
+        upgrade_ui.command_palette(self.win, q)
 
     # ------------------------------------------------------------------ gemeinsame Gruppen
     def g_clipboard(self, p):
@@ -281,6 +273,10 @@ class RibbonUI:
         g.small("Stop 0", "stop", lambda: self.sim.stop_all())
         g.column()
         g.small("Reset", "reset", self.win.reset_all)
+        g = p.group('Prüfen und Debuggen')
+        g.large('Produktions-\ncockpit', 'analysis', self.win.open_cockpit, tip='Zelle, Signale und Leistung prüfen')
+        g.small('Debugger', 'step', self.win.open_debugger)
+        g.small('Haltepunkt', 'stop', lambda: self.win.editor.toggle(), tip='F9')
         g = p.group("Komponente")
         g.small("Import", "import", self.win.import_vcmx)
         g.small("An Roboterflansch", "robot", self.attach_flange, tip="Auswahl an den Flansch des aktiven Roboters fügen")

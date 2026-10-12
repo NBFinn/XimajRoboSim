@@ -41,6 +41,8 @@ import vcmx_import
 import modeling
 import part_geom
 from history import History, Autosave, tracked
+import project_store
+from code_editor import CodeEditor
 
 B = theme.BRAND
 SETTINGS = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "XimajRoboSim", "settings.json")
@@ -56,7 +58,7 @@ def load_settings():
 def save_settings(d):
     try:
         os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
-        json.dump(d, open(SETTINGS, "w", encoding="utf8"), indent=1)
+        project_store.atomic_json(SETTINGS, d)
     except Exception:
         pass
 
@@ -169,6 +171,8 @@ class MainWindow(QMainWindow):
         self.autosave_timer.timeout.connect(self._autosave)
         self.autosave_timer.start(120000)
         self._update_history_ui()
+        import upgrade_ui
+        upgrade_ui.install(self)
         QTimer.singleShot(350, self._recover_autosave)
         if _APPLIED:
             self.log_msg(f"Update auf Version {_APPLIED} wurde eingespielt.")
@@ -440,6 +444,16 @@ class MainWindow(QMainWindow):
         bottom.addTab(self._script_tab(), "Python-Skript")
         bottom.addTab(self._connect_tab(), "Konnektivität (OPC UA)")
         bottom.addTab(self._update_tab(), "Update / Info")
+        # Jede Seite kann unabhängig scrollen; breite inaktive Seiten vergrößern die aktive Seite nicht.
+        pages = [(bottom.widget(i), bottom.tabText(i)) for i in range(bottom.count())]
+        for _ in pages:
+            bottom.removeTab(0)
+        for page, title in pages:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QScrollArea.Shape.NoFrame)
+            area.setWidget(page)
+            bottom.addTab(area, title)
         self.bottom = bottom
         self.dock_b = self._dock("Werkzeuge", bottom, Bo)
         QTimer.singleShot(0, lambda: self.resizeDocks([self.dock_l, self.dock_r], [340, 320], Qt.Orientation.Horizontal))
@@ -583,6 +597,11 @@ class MainWindow(QMainWindow):
     def _scene_tab(self):
         w = QWidget()
         l = QVBoxLayout(w)
+        self.scene_search = QLineEdit()
+        self.scene_search.setPlaceholderText('Szene nach Name oder Art filtern …')
+        self.scene_search.setAccessibleName('Szenensuche')
+        self.scene_search.textChanged.connect(self.filter_scene)
+        l.addWidget(self.scene_search)
         self.obj_list = QListWidget()
         self.obj_list.currentRowChanged.connect(self.on_select_row)
         l.addWidget(self.obj_list, 1)
@@ -656,7 +675,14 @@ class MainWindow(QMainWindow):
         self.obj_list.blockSignals(False)
         if 0 <= cur < self.obj_list.count():
             self.obj_list.setCurrentRow(cur)
+        self.filter_scene()
         self.viewer.update()
+
+    def filter_scene(self):
+        text = self.scene_search.text().casefold()
+        for i in range(self.obj_list.count()):
+            item = self.obj_list.item(i)
+            item.setHidden(text not in item.text().casefold())
 
     def sel(self):
         r = self.obj_list.currentRow()
@@ -1646,7 +1672,7 @@ class MainWindow(QMainWindow):
     def _editor_tab(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        self.editor = QPlainTextEdit()
+        self.editor = CodeEditor(self)
         f = QFont("Cascadia Mono", 10)
         f.setStyleHint(QFont.StyleHint.Monospace)
         self.editor.setFont(f)
@@ -1932,13 +1958,14 @@ class MainWindow(QMainWindow):
         self.opc_ct.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.opc_ct.cellDoubleClicked.connect(lambda r, c: self.opc_client_edit(r))
         v2.addWidget(self.opc_ct)
-        hb = QHBoxLayout()
-        for txt, fn in (("Neu …", lambda: self.opc_client_edit(None)), ("Bearbeiten …", lambda: self.opc_client_edit(self.opc_ct.currentRow())),
-                        ("Verbinden", self.opc_client_connect), ("Trennen", self.opc_client_disconnect), ("Entfernen", self.opc_client_remove)):
+        hb = QGridLayout()
+        for index, (txt, fn) in enumerate((("Neu …", lambda: self.opc_client_edit(None)), ("Bearbeiten …", lambda: self.opc_client_edit(self.opc_ct.currentRow())),
+                        ("Verbinden", self.opc_client_connect), ("Trennen", self.opc_client_disconnect),
+                        ('Schreiben freigeben', self.opc_client_arm), ('Live-Diagnose', self.opc_client_diagnose),
+                        ("Entfernen", self.opc_client_remove))):
             b = QPushButton(txt)
             b.clicked.connect(lambda _=False, f=fn: f())
-            hb.addWidget(b)
-        hb.addStretch(1)
+            hb.addWidget(b, index // 4, index % 4)
         v2.addLayout(hb)
         l.addWidget(g2)
         info = QLabel(
@@ -2055,9 +2082,14 @@ class MainWindow(QMainWindow):
         import dialogs
         from opcua_client import ClientLink
         c = self.opc_clients[row] if row is not None and 0 <= row < len(self.opc_clients) else ClientLink(self.sim)
-        if dialogs.opcua_client_dialog(self, c):
-            if c not in self.opc_clients:
-                self.opc_clients.append(c)
+        edit = ClientLink.from_dict(self.sim, c.to_dict())
+        edit.password = c.password
+        if dialogs.opcua_client_dialog(self, edit):
+            c.disconnect(wait=False)
+            if c in self.opc_clients:
+                self.opc_clients[self.opc_clients.index(c)] = edit
+            else:
+                self.opc_clients.append(edit)
             self.sim.opcua_clients = [x.to_dict() for x in self.opc_clients]
             self.opc_clients_refresh()
 
@@ -2065,22 +2097,37 @@ class MainWindow(QMainWindow):
         r = self.opc_ct.currentRow()
         if 0 <= r < len(self.opc_clients):
             c = self.opc_clients[r]
-            ok = c.connect()
-            self.log_msg(f"OPC-UA-Client „{c.name}“: " + ("verbunden" if ok else f"Fehler {c.error}"))
+            ok = c.connect(wait=False)
+            self.log_msg(f"OPC-UA-Client „{c.name}“: " + ("Verbindung wird aufgebaut" if ok else f"Fehler {c.error}"))
             self.opc_clients_refresh()
 
     def opc_client_disconnect(self):
         r = self.opc_ct.currentRow()
         if 0 <= r < len(self.opc_clients):
-            self.opc_clients[r].disconnect()
+            self.opc_clients[r].disconnect(wait=False)
             self.opc_clients_refresh()
 
     def opc_client_remove(self):
         r = self.opc_ct.currentRow()
         if 0 <= r < len(self.opc_clients):
-            self.opc_clients.pop(r).disconnect()
+            self.opc_clients.pop(r).disconnect(wait=False)
             self.sim.opcua_clients = [x.to_dict() for x in self.opc_clients]
             self.opc_clients_refresh()
+
+    def opc_client_arm(self):
+        r = self.opc_ct.currentRow()
+        if 0 <= r < len(self.opc_clients):
+            try:
+                self.opc_clients[r].arm_writes()
+                self.log_msg('Schreibzugriffe ausdrücklich freigegeben: ' + self.opc_clients[r].name)
+            except ValueError as exc:
+                QMessageBox.warning(self, 'OPC UA', str(exc))
+
+    def opc_client_diagnose(self):
+        r = self.opc_ct.currentRow()
+        if 0 <= r < len(self.opc_clients):
+            import upgrade_ui
+            upgrade_ui.client_diagnose(self, self.opc_clients[r])
 
     def opc_clients_load(self):
         """Client-Verbindungen aus dem Projekt uebernehmen (nicht automatisch verbinden)"""
@@ -2284,7 +2331,8 @@ class MainWindow(QMainWindow):
     def run_prog(self):
         """Start: alle Roboter mit ihren Programmen gleichzeitig (pausierte werden fortgesetzt)."""
         self._displayed_error = None
-        self.sim.world_paused = False
+        if self.sim.any_busy():
+            return
         self.sim.active.src = self.editor.toPlainText()
         if any(r.state == "paused" for r in self.sim.robots):
             for r in self.sim.robots:
@@ -2292,6 +2340,14 @@ class MainWindow(QMainWindow):
                     r.resume(False)
             return
         if not self.sim.any_busy():
+            from diagnostics import inspect_cell
+            # Fehler blockieren den Start; Warnungen bleiben nachvollziehbar im Cockpit.
+            issues = inspect_cell(self.sim)
+            errors = [i for i in issues if i.level == 'Fehler']
+            if errors:
+                self.open_cockpit()
+                self.log_msg('Start abgebrochen: ' + errors[0].message)
+                return
             for r in self.sim.robots:
                 if r.mode == "statements":
                     errs = stm.validate(r.statements)
@@ -2309,7 +2365,6 @@ class MainWindow(QMainWindow):
         if self.sim.state in ("idle", "error", "stopped"):
             self.sim.load_program(self.editor.toPlainText())
             self.sim.start(True)
-            self.sim.state = "running"
         elif self.sim.state == "paused":
             self.sim.resume(True)
 
@@ -2328,13 +2383,17 @@ class MainWindow(QMainWindow):
         self._t_last = now
         self.do_jog(dt)
         active = self.sim.state in ("running", "wait", "stopping") or self.jog
-        self.sim.tick(dt) if self.sim.any_busy() else self.sim._update_world(dt)
-        if self.sim.state == "paused" and False:
-            pass
+        try:
+            self.sim.tick(dt)
+        except Exception as exc:
+            self.sim.pause_all()
+            self.log_msg(f'Simulation angehalten: {type(exc).__name__}: {exc}')
+            self.statusBar().showMessage(self.sim.message)
         self.process_opc_commands()
         self._opc_tick = getattr(self, "_opc_tick", 0) + 1
         if self._opc_tick % 60 == 0:                     # etwa jede Sekunde: Verbindungsstatus anzeigen
             self._opc_indicator()
+            self.opc_clients_refresh()
         self.viewer.update()
         if self.recording:
             self._rec_t += 1
@@ -2385,6 +2444,8 @@ class MainWindow(QMainWindow):
             self.bottom.setCurrentIndex(2)
             self.statusBar().showMessage(s.message)
         self.highlight_line()
+        self.editor.setReadOnly(any(r.busy() or r.state == 'paused' for r in s.robots))
+        self.editor.gutter.update()
         self.st_highlight()
         self.refresh_io()
         self.a_state.setText(s.state)
@@ -2403,8 +2464,8 @@ class MainWindow(QMainWindow):
         if len(s.robots) > 1:
             busy = sum(1 for x in s.robots if x.busy())
             self.state_l.setText(self.state_l.text() + f"  ·  {busy}/{len(s.robots)} Roboter aktiv")
-        n = len(self.log_view.toPlainText().splitlines())
-        if n != len(s.log):
+        if getattr(self, '_log_revision', -1) != s.log_revision:
+            self._log_revision = s.log_revision
             self.log_view.setPlainText("\n".join(s.log))
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
         if not self.sz_table.hasFocus() and self.sz_table.rowCount() != len(s.safety):
@@ -2421,16 +2482,17 @@ class MainWindow(QMainWindow):
             self.autosave.clear(self.project_path)
         self._restoring = True
         self.sim.reset_world()
-        self.sim.clear_robots()
-        self.sim.scene = default_scene()
-        self.sim.set_model("XR-9 (0.9 m, 6 kg)")
-        self.sim.safety, self.sim.waypoints = [], []
+        for client in self.opc_clients:
+            client.disconnect(wait=False)
+        fresh = Simulation().to_dict()
+        fresh['scene'] = [o.to_dict() for o in default_scene()]
+        fresh['robots'][0]['tool']['grip_out'] = 1
+        self.sim.from_dict(fresh)
+        self.opc_clients_load()
         self.editor.setPlainText(DEFAULT_PROGRAM)
         self.project_path = None
         self.viewer.selected, self.viewer.selection = None, []
-        self.refresh_scene_list()
-        self.fill_zones()
-        self.fill_points()
+        self.sync_from_sim()
         self.sim.src = self.editor.toPlainText()
         self._restoring = False
         self._clean_history()
@@ -2444,8 +2506,7 @@ class MainWindow(QMainWindow):
         old_path = self.project_path
         self.sim.src = self.editor.toPlainText()
         try:
-            with open(p, "w", encoding="utf8") as f:
-                json.dump(self.sim.to_dict(), f, indent=1)
+            project_store.write_project(p, self.sim.to_dict())
         except (OSError, ValueError) as err:
             QMessageBox.warning(self, 'Speichern', f'Projekt konnte nicht gespeichert werden: {err}')
             return False
@@ -2466,13 +2527,39 @@ class MainWindow(QMainWindow):
         was_dirty = self.dirty
         if not self._confirm_discard():
             return
-        with open(p, encoding='utf8') as f:
-            data = json.load(f)
+        try:
+            data = project_store.read_project(p)
+            # Die laufende Zelle bleibt bis zum erfolgreichen Probeaufbau unverändert.
+            candidate = Simulation()
+            model_snapshot = dict(MODELS)
+            try:
+                candidate.from_dict({**data, 'run_scripts': False})
+                loaded_models = dict(MODELS)
+            finally:
+                MODELS.clear()
+                MODELS.update(model_snapshot)
+        except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+            QMessageBox.warning(self, 'Projekt öffnen', f'Projekt konnte nicht geladen werden: {exc}')
+            return False
         if was_dirty:
             self.autosave.clear(self.project_path)
         self._restoring = True
         self.sim.reset_world()
-        self.sim.from_dict(data)
+        for client in self.opc_clients:
+            client.disconnect(wait=False)
+        # Der vollständig geladene Probeaufbau wird übernommen, ohne CAD-Dateien doppelt zu laden.
+        self.sim.__dict__.clear()
+        self.sim.__dict__.update(candidate.__dict__)
+        for robot in self.sim.robots:
+            robot.w = self.sim
+        MODELS.update(loaded_models)
+        self.sim.world_paused = True
+        self.sim.run_scripts = bool(data.get('run_scripts', False))
+        try:
+            self.sim.init_scripts()
+        except Exception as exc:
+            self.sim.script_host = None
+            self.sim.say('Komponenten-Skripte konnten nicht gestartet werden: ' + str(exc))
         self.viewer.selected, self.viewer.selection = None, []
         self.editor.setPlainText(self.sim.src)
         self.project_path = p
@@ -2488,6 +2575,16 @@ class MainWindow(QMainWindow):
         rec = [x for x in self.settings.get("recent", []) if os.path.normcase(x) != os.path.normcase(p)]
         self.settings["recent"] = [p] + rec[:14]
         save_settings(self.settings)
+
+    def open_cockpit(self):
+        self.dock_b.show()
+        self.bottom.setCurrentIndex(self.cockpit_index)
+        self.cockpit.check()
+
+    def open_debugger(self):
+        self.dock_b.show()
+        self.bottom.setCurrentIndex(self.debugger_index)
+        self.debugger.refresh()
 
     @tracked
     def import_vcmx(self):
@@ -2840,6 +2937,33 @@ def selftest():
         return f"{s.state}, {s.run_t:.1f} s"
     check("Simulation", run_cell)
     check("Statements", lambda: len(stm.generate([stm.new("PTP"), stm.new("WAIT_TIME")], "t")[0]))
+    def run_upgrade():
+        from project_store import write_project, read_project
+        from diagnostics import inspect_cell
+        import upgrade_ui
+        s = Simulation()
+        s.load_program('DEF main()\n$OUT[6]=TRUE\nWAIT FOR $IN[3]\nEND')
+        s.active.breakpoints = {2}
+        s.start()
+        s.tick(.02)
+        assert s.state == 'paused' and not s.io.get_out(6)
+        before = s.t
+        s.tick(.5)
+        assert s.t == before
+        s.resume()
+        s.tick(.02)
+        assert s.state == 'wait' and s.io.get_out(6)
+        assert not s.start()
+        s.io.set_in(3, True)
+        s.tick(.02)
+        assert s.state == 'idle'
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'test.xrsim')
+            write_project(path, s.to_dict())
+            assert read_project(path)['robots'][0]['breakpoints'] == [2]
+        assert not any(i.level == 'Fehler' for i in inspect_cell(s))
+        return 'Haltepunkt, Pause, WAIT, Mehrfachstart und atomare Datei geprüft'
+    check('Upgrade 2.0', run_upgrade)
     p = os.path.join(tempfile.gettempdir(), "xrs_selftest.txt")
     open(p, "w", encoding="utf8").write("\n".join(out))
     print("\n".join(out))

@@ -2,9 +2,23 @@
 
 **Roboterzellen planen, programmieren und simulieren – eine Eigenentwicklung der Ximaj IT Solutions.**
 
-Ximaj RoboSim ist eine eigenständige Software. Sie enthält keinen Code, keine CAD-Modelle, keine
-Bibliotheken und keine Marken von Roboterherstellern oder anderen Simulationsprogrammen. Alle Robotermodelle (XR-Reihe),
-Katalogteile, die Programmiersprache XRL, das Design und das Icon sind eigene Arbeiten.
+Ximaj RoboSim ist eine eigenständige Anwendung mit eigener Simulation, XR-Modellen und XRL-Interpreter.
+CAD-Daten und Programme können importiert werden. Herstellervorlagen sind vereinfachte Simulationsmodelle,
+keine geprüften Steuerungsmodelle. Die verwendeten Bibliotheken stehen in `requirements.txt`.
+
+## Version 2.0.0
+
+- Produktionscockpit: Zelle prüfen, Signalverbindungen beobachten, Diagnose exportieren, Zeitrückstand erkennen.
+- Debugger: Zeilennummern, Haltepunkte vor der Anweisung, lokale Variablen und Aufrufstapel; F9 / F10 / F5.
+- Verlässliche Pause der ganzen Zelle, erhaltene WAIT-Bedingungen und Schutz gegen mehrfachen Start.
+- OPC-UA-Client: Verbindung und Browse im Hintergrund, Wiederverbinden, Schreibfreigabe nach Abbruch,
+  Live-Diagnose, `nsu=`-Adressen und Pose-/Achsenarrays. Bestehende Serverknoten bleiben verfügbar.
+- Atomare Projektdateien mit `.bak`, Prüfung vor dem Laden, explizite Befehlspalette mit Strg+K,
+  Szenenfilter und kompakte Menüauswahl bei kleinen Fenstern.
+- Räumliche Vorauswahl von Auflagen, zwischengespeicherte Transformationen und begrenztes Zeitbudget
+  mit sichtbarem Rückstand statt übersprungenen Simulationsschritten.
+
+Bedienung und Grenzen: [UPGRADE-2.0.md](UPGRADE-2.0.md). Details: [CHANGELOG.md](CHANGELOG.md).
 
 ## Neu seit 1.2
 

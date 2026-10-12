@@ -1379,11 +1379,14 @@ def opcua_client_dialog(win, c):
     per.setDecimals(2)
     per.setSuffix(" s")
     per.setValue(c.period)
+    reconnect = QCheckBox('Bei Abbruch automatisch wiederverbinden; Schreibzugriffe bleiben danach gesperrt')
+    reconnect.setChecked(c.reconnect)
     f.addRow("Name", name)
     f.addRow("Server-URL", url)
     f.addRow("Benutzer (optional)", user)
     f.addRow("Passwort", pw)
     f.addRow("Abfragezyklus", per)
+    f.addRow(reconnect)
     l.addLayout(f)
     sp = QSplitter()
     left = QWidget()
@@ -1433,6 +1436,7 @@ def opcua_client_dialog(win, c):
         items = [f"IN:{i}" for i in range(1, 17)] + [f"OUT:{i}" for i in range(1, 17)] + ["OVERRIDE", "SPEED"]
         for r in win.sim.robots:
             items += [f"AXIS:{r.name}:{i}" for i in range(1, 7)] + [f"TCP:{r.name}:{a}" for a in "XYZABC"] + [f"STATE:{r.name}"]
+            items += [f'JOINTS:{r.name}', f'POSE:{r.name}:BASE', f'POSE:{r.name}:WORLD']
         cb.addItems(items)
         cb.setCurrentText(val)
         return cb
@@ -1461,6 +1465,7 @@ def opcua_client_dialog(win, c):
         c.user = user.text().strip()
         c.password = pw.text()
         c.period = per.value()
+        c.reconnect = reconnect.isChecked()
 
     def fill(rows):
         q = flt.text().lower()
@@ -1476,15 +1481,35 @@ def opcua_client_dialog(win, c):
     def browse():
         apply_fields()
         status.setText("Verbinde …")
-        QApplication_process()
-        try:
-            rows = c.browse()
-        except Exception as e:
-            status.setText(f"Fehler: {type(e).__name__}: {e}")
-            return
-        found[:] = rows
-        fill(rows)
-        status.setText(f"{len(rows)} Variablen gefunden auf {c.url}")
+        bbrowse.setEnabled(False)
+        from opcua_client import ClientLink
+        import threading
+        probe = ClientLink.from_dict(win.sim, c.to_dict())
+        probe.password = c.password
+        state = {}
+        def work():
+            try:
+                state['rows'] = probe.browse()
+            except Exception as exc:
+                state['error'] = f'{type(exc).__name__}: {exc}'
+            finally:
+                state['done'] = True
+        def poll():
+            if not state.get('done'):
+                return
+            browse_timer.stop()
+            bbrowse.setEnabled(True)
+            if 'error' in state:
+                status.setText('Fehler: ' + state['error'])
+            else:
+                found[:] = state['rows']
+                fill(found)
+                status.setText(f'{len(found)} Variablen auf {probe.url}')
+        browse_timer = QTimer(d)
+        browse_timer.timeout.connect(poll)
+        d.finished.connect(browse_timer.stop)
+        browse_timer.start(50)
+        threading.Thread(target=work, daemon=True).start()
 
     def used_inputs():
         out = set()

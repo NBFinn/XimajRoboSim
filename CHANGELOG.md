@@ -1,3 +1,23 @@
+## 2.0.0 – 12.10.2026
+
+- Neues Produktionscockpit mit Zellprüfung, Hinweisen zur nächsten Maßnahme, Signalfilter und JSON-Bericht.
+- XRL-Debugger mit Haltepunkten, Zeilennummern, lokalen Variablen und Unterprogramm-Aufrufstapel.
+- Pause hält die ganze Zelle an. Einzelne Roboter behalten beim Fortsetzen WAIT-Bedingungen, Verzögerungen
+  und Pulse; ein wiederholter Start setzt laufende Programme nicht zurück.
+- Projektspeicherung erfolgt atomar mit Sicherung der Vorversion. Ungültige Projekte ersetzen die aktuelle
+  Zelle nicht. Neue Projekte entfernen vorherige Signalverbindungen, Clientkonfiguration und Haltepunkte.
+- OPC-UA-Verbindung und Browse blockieren die Oberfläche nicht. Wiederverbinden mit begrenztem Backoff;
+  nach Abbruch bleibt Schreiben gesperrt, bis der Nutzer es freigibt. Live-Diagnose je Zuordnung.
+- URI-basierte NodeIds, Achs-/Pose-Arrays, strikte Signaltypen und eindeutige Roboternamen; mehrere Ziele
+  für denselben gelesenen Knoten werden unabhängig aktualisiert. Passwörter werden nicht gespeichert.
+- Konservative räumliche Auflagensuche und Pose-Caches beschleunigen große Zellen. Ein Zeitbudget begrenzt
+  Teilschritte pro UI-Tick; offener Rückstand wird angezeigt und später verarbeitet.
+- Explizite Befehlspalette statt sofortiger Ausführung des ersten Suchtreffers. Szenenfilter behält
+  Objektzuordnungen. Kompakte Menüauswahl unter 1100 px, unabhängig scrollbare Werkzeugseiten.
+- Auswahlgruppen des Menübands gehören zum jeweiligen Fenster und bleiben nach erneutem Öffnen gültig.
+- Freie Teile werden nach dem Loslassen am Hallenboden aufgefangen, wenn die Greifernäherung sie unter Z=0 platziert.
+- Selbsttest der EXE prüft zusätzlich Haltepunkt, Pause, WAIT, Mehrfachstart und sichere Projektspeicherung.
+
 ## 1.4.0
 
 - Greifer nimmt ein später in Reichweite kommendes Teil bei weiterhin aktivem Greifbefehl auf. Pro Roboter wird höchstens ein Teil gehalten; Greifabstand wird an der gedrehten Werkstück-Hülle geprüft.

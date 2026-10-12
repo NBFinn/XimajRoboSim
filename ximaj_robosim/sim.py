@@ -14,6 +14,7 @@ import math
 import random
 import re
 import threading
+import time
 import numpy as np
 
 from kinematics import (MODELS, HOME, D2R, R2D, pose_to_mat, mat_to_pose, inv, rx, ry, rz, tr)
@@ -155,7 +156,16 @@ class SceneObj:
         self.vc_component = name
 
     def matrix(self):
-        return pose_to_mat(*self.pos, *self.rot)
+        key = tuple(self.pos) + tuple(self.rot)
+        if getattr(self, '_matrix_key', None) != key:
+            self._matrix_key = key
+            self._matrix_cache = pose_to_mat(*self.pos, *self.rot)
+            self._inverse_cache = inv(self._matrix_cache)
+        return self._matrix_cache.copy()
+
+    def inverse_matrix(self):
+        self.matrix()
+        return self._inverse_cache.copy()
 
     def half(self):
         s = self.size
@@ -356,6 +366,10 @@ class Robot:
         self.gen = None
         self.state = "idle"
         self.step_mode = False
+        self.breakpoints = set()
+        self._paused_state = 'running'
+        self._pause_at = None
+        self.wait_started = None
         self.motion = None
         self.wait_until = None
         self.wait_fn = None
@@ -667,12 +681,24 @@ class Robot:
         self.cur_line = 0
         self.collision = None
         self.safety_msg = ""
+        self._paused_state = 'running'
+        self._pause_at = None
+        self.wait_started = None
+        self.pending_stop = None
+        self.pulses.clear()
 
     def reset(self):
         self.reset_program()
         self.update_sv()
 
     def start(self, step=False):
+        if self.busy():
+            return False
+        if self.state == 'paused':
+            self.resume(step)
+            return True
+        self.reset_program()
+        self._wn = 0
         self.w._sync_world_initial()
         self.w.world_paused = False
         if self.w.script_host:
@@ -699,15 +725,26 @@ class Robot:
         self.trail.clear()
         self.collision = None
         self.say("Programm gestartet" + (" (Einzelschritt)" if step else ""))
+        return True
 
     def pause(self):
         if self.state in ("running", "wait"):
+            self._paused_state = self.state
+            self._pause_at = self.t
             self.state = "paused"
 
     def resume(self, step=False):
         if self.state == "paused":
             self.step_mode = step
-            self.state = "running"
+            elapsed = self.t - self._pause_at if self._pause_at is not None else 0.
+            if self.wait_until is not None:
+                self.wait_until += elapsed
+            self.pulses = [(t + elapsed, n, value) for t, n, value in self.pulses]
+            if self.wait_started is not None:
+                self.wait_started += elapsed
+            self.state = self._paused_state
+            self._pause_at = None
+            self.w.world_paused = False
         elif self.state in ("idle", "error", "stopped"):
             self.start(step)
 
@@ -748,8 +785,11 @@ class Robot:
             k = ev[0]
             if k == "line":
                 self.cur_line = ev[1]
-                if self.step_mode:
+                if self.step_mode or self.cur_line in getattr(self, 'breakpoints', set()):
+                    self._paused_state = 'running'
+                    self._pause_at = self.t
                     self.state = "paused"
+                    self.w.pause_all()
                     return
                 continue
             if k == "tick":
@@ -782,10 +822,12 @@ class Robot:
                 return
             if k == "wait":
                 self.wait_until = self.t + ev[1]
+                self.wait_started = self.t
                 self.state = "wait"
                 return
             if k == "waitfor":
                 self.wait_fn = ev[1]
+                self.wait_started = self.t
                 self.state = "wait"
                 lines = self.src.splitlines()
                 condition = lines[self.cur_line - 1].strip() if 0 < self.cur_line <= len(lines) else "WAIT FOR"
@@ -799,7 +841,10 @@ class Robot:
                 self.say(ev[1])
                 continue
             if k == "halt":
+                self._paused_state = 'running'
+                self._pause_at = self.t
                 self.state = "paused"
+                self.w.pause_all()
                 self.say("HALT - Programm angehalten")
                 return
 
@@ -808,6 +853,8 @@ class Robot:
 
     # ---- Zeitschritt (von der Welt aufgerufen; Weltzeit wurde bereits erhoeht)
     def step(self, dt):
+        if self.state == 'paused':
+            return
         if self.busy():
             self.run_t += dt
         for p in list(self.pulses):
@@ -819,11 +866,13 @@ class Robot:
         if self.state == "wait":
             if self.wait_until is not None and self.t >= self.wait_until:
                 self.wait_until = None
+                self.wait_started = None
                 self.state = "running"
             elif self.wait_fn is not None:
                 try:
                     if self.wait_fn():
                         self.wait_fn = None
+                        self.wait_started = None
                         self.state = "running"
                 except Exception as e:
                     self.state = "error"
@@ -1060,6 +1109,7 @@ class Robot:
             "tool": self.tool.to_dict(), "q": list(map(float, self.q)), "e1": self.e1, "track": self.track,
             "program": self.src, "waypoints": self.waypoints, "tool_table": self.tool_table,
             "statements": self.statements, "mode": self.mode,
+            "breakpoints": sorted(getattr(self, 'breakpoints', set())),
             "base_table": self.base_table, "sv": {k: self.sv[k] for k in ("VEL_CP", "ACC_CP", "VEL_ORI1")},
         }
 
@@ -1077,6 +1127,7 @@ class Robot:
         self.e_limits()
         self.e1 = float(d.get("e1", 0.0))
         self.src = d.get("program", self.src)
+        self.breakpoints = {int(n) for n in d.get('breakpoints', []) if isinstance(n, int) and n > 0}
         self.waypoints = d.get("waypoints", [])
         self.statements = d.get("statements", [])
         self.mode = d.get("mode", "xrl")
@@ -1110,6 +1161,12 @@ class Simulation:
         d["speed_factor"] = 1.0
         d["override"] = 1.0
         d["log"] = []
+        d['log_revision'] = 0
+        d['pending_dt'] = 0.
+        d['max_substeps'] = 128
+        d['frame_budget_ms'] = None
+        d['performance'] = {'step_ms': 0., 'substeps': 0, 'backlog_s': 0., 'actual_speed': 0.}
+        d['_support_index'] = None
         d["message"] = ""
         d["safety"] = []
         d["swept"] = set()
@@ -1175,20 +1232,34 @@ class Simulation:
         if len(self.log) > 800:
             del self.log[:-500]
         self.message = m
+        self.log_revision += 1
 
     # ---- gemeinsame Steuerung
     def start_all(self, step=False):
+        if self.any_busy():
+            return False
+        if any(r.state == 'paused' for r in self.robots):
+            for r in self.robots:
+                if r.state == 'paused':
+                    r.resume(step)
+            self.world_paused = False
+            return True
+        self.world_paused = False
         self.stats.update(created=0, consumed=0, t0=self.t)
         for s in self.scene:
             s.consumed = 0
         for r in self.robots:
             r.start(step)
+        return True
 
     def stop_all(self):
+        self.world_paused = True
         for r in self.robots:
             r.stop(0)
 
     def pause_all(self):
+        self.world_paused = True
+        self.pending_dt = 0.
         for r in self.robots:
             r.pause()
 
@@ -1197,6 +1268,7 @@ class Simulation:
 
     def wire_links(self):
         """Bind persisted endpoints; legacy scenes retain the shared robot bus."""
+        self._refresh_links()
         objects = {o.name: o for o in self.scene}
         robots = {r.name: r for r in self.robots}
         if self.links:
@@ -1266,9 +1338,13 @@ class Simulation:
         name, signal = endpoint
         port = re.fullmatch(r"Outputs_Port_(\d+)", signal)
         if port:
-            robot = next((r for r in self.robots if r.name == name), None)
+            robot = getattr(self, '_robots_lookup', {}).get(name)
+            if robot is None or robot.name != name:
+                robot = next((r for r in self.robots if r.name == name), None)
             return bool(robot and robot.io.get_out(int(port[1])))
-        o = next((o for o in self.scene if o.name == name), None)
+        o = getattr(self, '_objects_lookup', {}).get(name)
+        if o is None or o.name != name:
+            o = next((o for o in self.scene if o.name == name), None)
         if o is None:
             return False
         n = o.io if o.kind == "sensor" else o.color_outs.get(signal, o.detected)
@@ -1284,11 +1360,11 @@ class Simulation:
         for (name, signal), value in values.items():
             port = re.fullmatch(r"Inputs_Port_(\d+)", signal)
             if port:
-                r = next((r for r in self.robots if r.name == name), None)
+                r = self._robots_lookup.get(name)
                 if r:
                     r.io.set_in(int(port[1]), value)
                 continue
-            o = next((o for o in self.scene if o.name == name), None)
+            o = self._objects_lookup.get(name)
             if o:
                 n = o.inputs.get(signal, 0) if o.kind == "lamp" else o.trigger if o.kind in ("spawner", "color_sensor") else o.io
                 if IO.is_virtual(int(n)):
@@ -1296,7 +1372,7 @@ class Simulation:
                     self.io.set_in(int(n), value)
 
     def _driven(self, o, n):
-        links = [x for x in self.links if x["dst"][0] == o.name]
+        links = getattr(self, '_links_by_target', {}).get(o.name, [])
         return any(self._source_signal(x["src"]) for x in links) if links else self.io.get_out(int(n)) or (IO.is_virtual(int(n)) and self.io.get_in(int(n)))
 
     def _beam_part(self, sensor):
@@ -1311,13 +1387,20 @@ class Simulation:
     # ---- Zeitschritt
     def tick(self, dt_real):
         from editing import update_hierarchy
-        if self.world_paused and not self.any_busy():
+        if not math.isfinite(dt_real) or dt_real < 0 or not math.isfinite(self.speed_factor) or self.speed_factor <= 0:
+            raise ValueError('Zeitschritt und Zeitraffer müssen endliche positive Werte sein')
+        if self.world_paused and not any(r.state == 'stopping' for r in self.robots):
             return
-        dt = dt_real * self.speed_factor
-        n = max(1, int(math.ceil(dt / 0.01)))
-        h = dt / n
+        self.pending_dt += dt_real * self.speed_factor
+        n = min(max(1, int(math.ceil(self.pending_dt / .01))), self.max_substeps)
+        if self.pending_dt <= 0:
+            return
+        h = min(.01, self.pending_dt / n)
+        started, before, count = time.perf_counter(), self.t, 0
         for _ in range(n):
+            self.pending_dt = max(0., self.pending_dt - h)
             self.t += h
+            count += 1
             self._update_world(h)
             for r in self.robots:
                 self._check_limits(r)
@@ -1328,6 +1411,14 @@ class Simulation:
                 self.script_host.update()
             if self.recorder and self.recorder.active:
                 self.recorder.sample(self)
+            if self.world_paused and not any(r.state == 'stopping' for r in self.robots):
+                self.pending_dt = 0.
+                break
+            if self.frame_budget_ms and (time.perf_counter() - started) * 1000 >= self.frame_budget_ms:
+                break
+        self._support_index = None
+        self.performance.update(step_ms=(time.perf_counter() - started) * 1000, substeps=count,
+                                backlog_s=self.pending_dt, actual_speed=(self.t - before) / max(dt_real, 1e-9))
 
     def _check_limits(self, robot):
         limits = robot.model.limits
@@ -1382,6 +1473,8 @@ class Simulation:
             r.io.out[:] = [False] * r.io.N
         self.rng.seed(0)
         self.t = 0.0
+        self.pending_dt = 0.
+        self._support_index = None
         self.stats.update(created=0, consumed=0, t0=0.0)
         self.swept.clear()
         self.message = "Simulation zurückgesetzt"
@@ -1396,10 +1489,20 @@ class Simulation:
             self._robot_initial.clear()
             self._consumed_parts.clear()
 
+    def _refresh_links(self):
+        self._robots_lookup = {r.name: r for r in self.robots}
+        self._objects_lookup = {o.name: o for o in self.scene}
+        self._links_by_target = {}
+        for link in self.links:
+            self._links_by_target.setdefault(link['dst'][0], []).append(link)
+
     def _update_world(self, dt):
         self._sync_world_initial()
         if self.world_paused:
             return
+        self._refresh_links()
+        from spatial import SupportIndex
+        self._support_index = SupportIndex(self.scene)
         for r in self.robots:
             self._robot_initial.setdefault(id(r), (r.q.copy(), r.e1))
         for o in self.scene:
@@ -1416,7 +1519,7 @@ class Simulation:
             if getattr(b, "stopped", False) or not ((b.io == 0) or self._driven(b, b.io)):   # Interagieren: von Hand angehalten
                 continue
             Mb = b.matrix()
-            Mi = inv(Mb)
+            Mi = b.inverse_matrix()
             half = b.half()
             for o in scene:
                 if o is b or o.attached or o.parent or not o.graspable:
@@ -1452,6 +1555,9 @@ class Simulation:
         # Schwerkraft
         for o in scene:
             if o.graspable and not o.attached and not o.parent:
+                # Beim Loslassen kann die Näherung des Greifers unter z=0 liegen.
+                # Freie Teile dürfen dadurch nicht dauerhaft unter dem Hallenboden bleiben.
+                o.pos[2] = max(0., o.pos[2])
                 floor = self.support_z(o)
                 if o.pos[2] > floor + 0.01:
                     o.pos[2] = max(floor, o.pos[2] - 3000 * dt * dt * 50 - 400 * dt)
@@ -1520,10 +1626,12 @@ class Simulation:
                     if self.script_host and s.product_templates:
                         template = s.product_templates[(s.spawned - 1) % len(s.product_templates)]
                         self.script_host.clone(part, template)
+        self._support_index = None
 
     def support_z(self, o):
         z = 0.0
-        for b in self.scene:
+        candidates = self._support_index.query(*o.pos[:2]) if self._support_index is not None else self.scene
+        for b in candidates:
             if b is o or b.attached or b.kind in ("sensor", "color_sensor", "lamp", "spawner", "sink", "zone"):
                 continue
             if b.kind == "conveyor_arc":
@@ -1532,7 +1640,7 @@ class Simulation:
                 continue
             if not (b.obstacle or b.kind == "conveyor"):
                 continue
-            L = (inv(b.matrix()) @ np.array([*o.pos[:2], b.pos[2] + 1, 1.0]))[:3]
+            L = (b.inverse_matrix() @ np.array([*o.pos[:2], b.pos[2] + 1, 1.0]))[:3]
             h = b.half()
             if abs(L[0]) <= h[0] and abs(L[1]) <= h[1]:
                 z = max(z, b.top_z())

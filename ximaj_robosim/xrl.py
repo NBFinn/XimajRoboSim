@@ -571,6 +571,7 @@ class Interp:
         self.lenient = lenient
         self.stop = False
         self._warned = set()
+        self.frames = []
 
     def warn(self, msg):
         if msg not in self._warned:
@@ -780,11 +781,21 @@ class Interp:
             raise XrlError(f"Unterprogramm {name} nicht gefunden", 0)
         params, body = self.defs[name]
         env = dict(zip(params, args))
+        self.frames.append((name, env))
         try:
             yield from self.exec_block(body, env)
         except _Return as r:
             return r.v
+        finally:
+            self.frames.pop()
         return None
+
+    def debug_variables(self):
+        """Momentaufnahme vorhandener Werte; wertet keinen fremden Ausdruck aus."""
+        values = {k: v for k, v in self.glob.items() if k not in ('TOOL_DATA', 'BASE_DATA')}
+        for _, env in self.frames:
+            values.update(env)
+        return values
 
     def apply_with(self, withs, env):
         """Nur die fuer die Simulation relevanten Zusaetze: Werkzeug, Basis, Geschwindigkeit."""
